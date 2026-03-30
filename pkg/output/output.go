@@ -25,12 +25,14 @@ const (
 
 // Printer handles all output formatting
 type Printer struct {
-	mu       sync.Mutex
-	silent   bool
-	noColor  bool
-	jsonMode bool
-	outFile  *os.File
-	results  []common.ScanResult
+	mu                sync.Mutex
+	silent            bool
+	noColor           bool
+	jsonMode          bool
+	outFile           *os.File
+	jsonFileHasResult bool
+	totalResults      int
+	vulnResults       int
 }
 
 // NewPrinter creates a new Printer instance
@@ -39,7 +41,6 @@ func NewPrinter(silent, noColor, jsonMode bool, outputFile string) *Printer {
 		silent:   silent,
 		noColor:  noColor,
 		jsonMode: jsonMode,
-		results:  make([]common.ScanResult, 0),
 	}
 	if outputFile != "" {
 		f, err := os.Create(outputFile)
@@ -47,6 +48,13 @@ func NewPrinter(silent, noColor, jsonMode bool, outputFile string) *Printer {
 			fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
 		} else {
 			p.outFile = f
+			if p.jsonMode {
+				if _, err := p.outFile.WriteString("[\n"); err != nil {
+					fmt.Fprintf(os.Stderr, "Error initializing JSON output file: %v\n", err)
+					p.outFile.Close()
+					p.outFile = nil
+				}
+			}
 		}
 	}
 	return p
@@ -56,8 +64,11 @@ func NewPrinter(silent, noColor, jsonMode bool, outputFile string) *Printer {
 func (p *Printer) Close() {
 	if p.outFile != nil {
 		if p.jsonMode {
-			data, _ := json.MarshalIndent(p.results, "", "  ")
-			p.outFile.Write(data)
+			if p.jsonFileHasResult {
+				p.outFile.WriteString("\n]\n")
+			} else {
+				p.outFile.WriteString("]\n")
+			}
 		}
 		p.outFile.Close()
 	}
@@ -124,23 +135,30 @@ func (p *Printer) magenta() string {
 	return Magenta
 }
 
+func (p *Printer) dim() string {
+	if p.noColor {
+		return ""
+	}
+	return Dim
+}
+
 // Banner prints the tool banner
 func (p *Printer) Banner() {
 	if p.silent {
 		return
 	}
 	fmt.Printf(`%s
-   __    __  __
-  / /   / /_/ /_____ ___  __(_) /____
- / _ \ / __/ __/ __ \/ ___/ / __/ _ \
-/ / / / /_/ /_/ /_/ (__  ) / /_/  __/
-\/ /_/\__/\__/ .___/____/_/\__/\___/
-            /_/  %sv1.0%s
+ _   _ _____ _____ ____  ____  _   _ ___ _____ _____
+| | | |_   _|_   _|  _ \/ ___|| | | |_ _|_   _| ____|
+| |_| | | |   | | | |_) \___ \| | | || |  | | |  _|
+|  _  | | |   | | |  __/ ___) | |_| || |  | | | |___
+|_| |_| |_|   |_| |_|   |____/ \___/|___| |_| |_____|
 
-  %sUnified HTTP Security Testing Tool%s
-  %sBypass • CRLF • CORS • Methods • Smuggle%s
+           %shttpsuite v1.0%s
+  %sSmart HTTP Security Testing for Pentest and Bug Bounty Work%s
+  %sBypass • CRLF • CORS • Methods • Smuggle • Sync%s
 
-%s`, p.cyan(), p.bold(), p.reset(), p.green(), p.reset(), Dim, p.reset(), p.reset())
+%s`, p.cyan(), p.bold(), p.reset(), p.green(), p.reset(), p.dim(), p.reset(), p.reset())
 }
 
 // Info prints an info message
@@ -195,11 +213,21 @@ func (p *Printer) Result(r common.ScanResult) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.results = append(p.results, r)
+	p.totalResults++
+	if r.Vulnerable {
+		p.vulnResults++
+	}
 
 	if p.jsonMode {
 		data, _ := json.Marshal(r)
 		fmt.Println(string(data))
+		if p.outFile != nil {
+			if p.jsonFileHasResult {
+				p.outFile.WriteString(",\n")
+			}
+			p.outFile.Write(data)
+			p.jsonFileHasResult = true
+		}
 	} else {
 		color := p.colorForStatus(r.StatusCode)
 		vuln := ""
@@ -240,9 +268,9 @@ func (p *Printer) Result(r common.ScanResult) {
 	}
 }
 
-// GetResults returns all collected results
-func (p *Printer) GetResults() []common.ScanResult {
+// Stats returns the total and vulnerable result counts emitted so far.
+func (p *Printer) Stats() (int, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]common.ScanResult{}, p.results...)
+	return p.totalResults, p.vulnResults
 }

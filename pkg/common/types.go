@@ -12,6 +12,9 @@ type ScanResult struct {
 	StatusCode    int    `json:"status_code"`
 	ContentLength int    `json:"content_length"`
 	Detail        string `json:"detail,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Title         string `json:"title,omitempty"`
+	Fingerprint   string `json:"fingerprint,omitempty"`
 	Module        string `json:"module"`
 	Vulnerable    bool   `json:"vulnerable"`
 }
@@ -28,6 +31,7 @@ type Config struct {
 	URL         string
 	URLs        []string
 	Method      string
+	PayloadDir  string
 	Concurrency int
 	Timeout     time.Duration
 	Retries     int
@@ -48,6 +52,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Method:      "GET",
+		PayloadDir:  "payloads",
 		Concurrency: 10,
 		Timeout:     10 * time.Second,
 		Retries:     1,

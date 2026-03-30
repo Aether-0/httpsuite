@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -62,22 +63,20 @@ func NewScanner(cfg *common.Config, printer *output.Printer, extended bool, gadg
 func (s *Scanner) Run() {
 	s.printer.Info("Starting HTTP smuggling scan for %d target(s)", len(s.config.URLs))
 
-	payloads := s.loadPayloads()
-	if len(payloads) == 0 {
-		s.printer.Error("No smuggling payloads loaded")
-		return
-	}
-	s.printer.Info("Loaded %d smuggling gadgets", len(payloads))
-
 	for _, targetURL := range s.config.URLs {
-		s.scanTarget(targetURL, payloads)
+		s.scanTarget(targetURL)
 	}
 }
 
-func (s *Scanner) scanTarget(targetURL string, payloads []Payload) {
+func (s *Scanner) scanTarget(targetURL string) {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		s.printer.Error("Error parsing URL %s: %v", targetURL, err)
+		return
+	}
+
+	if parsedURL.Scheme != "https" {
+		s.printer.Warning("Skipping %s: smuggling checks currently require HTTPS with HTTP/2 ALPN", targetURL)
 		return
 	}
 
@@ -93,6 +92,18 @@ func (s *Scanner) scanTarget(targetURL string, payloads []Payload) {
 
 	s.printer.Info("Scanning %s for HTTP smuggling vulnerabilities", targetURL)
 
+	payloads := s.loadPayloads(host)
+	if len(payloads) == 0 {
+		s.printer.Error("No smuggling payloads loaded for %s", targetURL)
+		return
+	}
+	s.printer.Info("Loaded %d smuggling gadgets for %s", len(payloads), host)
+
+	method := strings.ToUpper(s.config.Method)
+	if method == "" || method == "GET" {
+		method = "POST"
+	}
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, s.config.Concurrency)
 
@@ -103,7 +114,7 @@ func (s *Scanner) scanTarget(targetURL string, payloads []Payload) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			result := s.testPayload(host, port, parsedURL.Path, parsedURL.RawQuery, p)
+			result := s.testPayload(host, port, parsedURL.Scheme, parsedURL.Path, parsedURL.RawQuery, method, p)
 
 			vulnerable := false
 			detail := p.Name + " → " + result
@@ -119,7 +130,7 @@ func (s *Scanner) scanTarget(targetURL string, payloads []Payload) {
 
 			s.printer.Result(common.ScanResult{
 				URL:        targetURL,
-				Method:     "POST",
+				Method:     method,
 				Module:     "smuggle",
 				Detail:     detail,
 				Vulnerable: vulnerable,
@@ -129,7 +140,7 @@ func (s *Scanner) scanTarget(targetURL string, payloads []Payload) {
 	wg.Wait()
 }
 
-func (s *Scanner) testPayload(host, port, path, query string, payload Payload) string {
+func (s *Scanner) testPayload(host, port, scheme, path, query, method string, payload Payload) string {
 	addr := net.JoinHostPort(host, port)
 
 	conn, err := tls.DialWithDialer(
@@ -185,7 +196,7 @@ func (s *Scanner) testPayload(host, port, path, query string, payload Payload) s
 	}
 
 	// Build HEADERS frame with smuggling payload
-	headers := buildHPACKHeaders(host, targetPath, payload)
+	headers := buildHPACKHeaders(host, targetPath, scheme, method, payload)
 
 	// Send HEADERS frame (stream 1)
 	err = writeFrame(conn, frameHeaders, flagEndHeaders, 1, headers)
@@ -277,13 +288,19 @@ func readFrame(r io.Reader) (*Frame, error) {
 }
 
 // buildHPACKHeaders builds a simplified HPACK encoded headers block
-func buildHPACKHeaders(host, path string, payload Payload) []byte {
+func buildHPACKHeaders(host, path, scheme, method string, payload Payload) []byte {
 	var buf []byte
 
-	// :method = POST (indexed: 0x83)
-	buf = append(buf, 0x83)
-	// :scheme = https (indexed: 0x87)
-	buf = append(buf, 0x87)
+	// :method = <method> (literal with indexing, name index 2)
+	buf = append(buf, 0x42)
+	buf = append(buf, encodeHPACKString(method)...)
+	// :scheme = <scheme>
+	if scheme == "https" {
+		buf = append(buf, 0x87)
+	} else {
+		buf = append(buf, 0x46)
+		buf = append(buf, encodeHPACKString(scheme)...)
+	}
 	// :path = <path> (literal with indexing, name index 4)
 	buf = append(buf, 0x44)
 	buf = append(buf, encodeHPACKString(path)...)
@@ -320,7 +337,7 @@ func encodeHPACKString(s string) []byte {
 	return append(buf, []byte(s)...)
 }
 
-func (s *Scanner) loadPayloads() []Payload {
+func (s *Scanner) loadPayloads(hostname string) []Payload {
 	var payloads []Payload
 
 	if s.gadgetFile != "" {
@@ -330,12 +347,29 @@ func (s *Scanner) loadPayloads() []Payload {
 			return nil
 		}
 		for _, line := range lines {
-			p := parsePayloadLine(line)
+			p := parsePayloadLine(line, hostname)
 			if p != nil {
 				payloads = append(payloads, *p)
 			}
 		}
 		return payloads
+	}
+
+	if syncedFile := s.syncedPayloadFile(); syncedFile != "" {
+		lines, err := readPayloadsFile(syncedFile)
+		if err != nil {
+			s.printer.Error("Error reading synced gadget file: %v", err)
+			return nil
+		}
+		for _, line := range lines {
+			p := parsePayloadLine(line, hostname)
+			if p != nil {
+				payloads = append(payloads, *p)
+			}
+		}
+		if len(payloads) > 0 {
+			return payloads
+		}
 	}
 
 	gadgetList := DefaultGadgetList
@@ -345,7 +379,7 @@ func (s *Scanner) loadPayloads() []Payload {
 
 	lines := strings.Split(gadgetList, "\n")
 	for _, line := range lines {
-		p := parsePayloadLine(line)
+		p := parsePayloadLine(line, hostname)
 		if p != nil {
 			payloads = append(payloads, *p)
 		}
@@ -354,11 +388,30 @@ func (s *Scanner) loadPayloads() []Payload {
 	return payloads
 }
 
-func parsePayloadLine(line string) *Payload {
+func (s *Scanner) syncedPayloadFile() string {
+	if s.config.PayloadDir == "" {
+		return ""
+	}
+
+	filename := "default.txt"
+	if s.extended {
+		filename = "extended.txt"
+	}
+
+	path := filepath.Join(s.config.PayloadDir, "smuggle", filename)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+
+	return ""
+}
+
+func parsePayloadLine(line, hostname string) *Payload {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil
 	}
+	line = strings.ReplaceAll(line, "[HOSTNAME]", hostname)
 
 	parts := strings.SplitN(line, "; ", 2)
 	if len(parts) != 2 {
@@ -375,6 +428,13 @@ func parsePayloadLine(line string) *Payload {
 	headerValue = strings.ReplaceAll(headerValue, "\\r", "\r")
 	headerValue = strings.ReplaceAll(headerValue, "\\n", "\n")
 	headerValue = strings.ReplaceAll(headerValue, "\\t", "\t")
+
+	if decodedHeaderName, err := url.PathUnescape(headerName); err == nil {
+		headerName = decodedHeaderName
+	}
+	if decodedHeaderValue, err := url.PathUnescape(headerValue); err == nil {
+		headerValue = decodedHeaderValue
+	}
 
 	return &Payload{
 		HeaderName:  headerName,

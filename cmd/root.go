@@ -16,6 +16,7 @@ import (
 	"github.com/aether-0/httpsuite/internal/smuggle"
 	"github.com/aether-0/httpsuite/pkg/common"
 	"github.com/aether-0/httpsuite/pkg/output"
+	"github.com/aether-0/httpsuite/pkg/payloadsync"
 	"github.com/aether-0/httpsuite/pkg/utils"
 )
 
@@ -41,6 +42,8 @@ func Execute() error {
 		return runSmuggle(os.Args[2:])
 	case "all":
 		return runAll(os.Args[2:])
+	case "sync-payloads":
+		return runSyncPayloads(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -62,14 +65,15 @@ func printUsage() {
 
 	fmt.Print(`
 `)
-	fmt.Printf("%s%s   __   __  __                _ __        \n", cyan, bold)
-	fmt.Printf("  / /  / /_/ /____  ___ __ __(_) /____    \n")
-	fmt.Printf(" / _ \\/ __/ __/ _ \\(_-</ // / / __/ -_)   \n")
-	fmt.Printf("/_//_/\\__/\\__/ .__/___\\_,_/_/\\__/\\__/    \n")
-	fmt.Printf("            /_/ Version 1.0.0%s\n", reset)
+	fmt.Printf("%s%s _   _ _____ _____ ____  ____  _   _ ___ _____ _____\n", cyan, bold)
+	fmt.Printf("| | | |_   _|_   _|  _ \\/ ___|| | | |_ _|_   _| ____|\n")
+	fmt.Printf("| |_| | | |   | | | |_) \\___ \\| | | || |  | | |  _|  \n")
+	fmt.Printf("|  _  | | |   | | |  __/ ___) | |_| || |  | | | |___ \n")
+	fmt.Printf("|_| |_| |_|   |_| |_|   |____/ \\___/|___| |_| |_____|%s\n", reset)
 	fmt.Printf("%s\n", reset)
-	fmt.Print(`  Unified HTTP Security Testing Tool
-  Bypass • CRLF • CORS • Methods • Smuggle
+	fmt.Print(`  httpsuite v1.0
+  Smart HTTP Security Testing for Pentest and Bug Bounty Work
+  Bypass • CRLF • CORS • Methods • Smuggle • Sync
 
 Usage:
   httpsuite <command> [flags]
@@ -81,6 +85,7 @@ Available Commands:
   methods     Test allowed HTTP methods on targets (inspired by httpc)
   smuggle     Test for HTTP request smuggling via H2 downgrade (inspired by smugglefuzz)
   all         Run all modules against target(s)
+  sync-payloads  Download current upstream payload files into a local payload directory
   help        Show this help message
   version     Show version
 
@@ -95,6 +100,7 @@ Global Flags (available for all commands):
   -j            JSON output mode
   -s            Silent mode
   -v            Verbose mode
+  --payload-dir string  Local payload override directory (default: payloads)
   --no-color    Disable colored output
 
 Examples:
@@ -104,6 +110,7 @@ Examples:
   httpsuite methods -u https://example.com
   httpsuite smuggle -u https://example.com
   httpsuite all -u https://example.com
+  httpsuite sync-payloads
   cat urls.txt | httpsuite crlf
 
 `)
@@ -140,6 +147,7 @@ func parseGlobalFlags(args []string, name string) (*common.Config, error) {
 	fs.BoolVar(&cfg.Verbose, "v", false, "Verbose mode")
 	fs.BoolVar(&cfg.NoColor, "no-color", false, "Disable color")
 	fs.BoolVar(&cfg.Redirect, "redirect", false, "Follow redirects")
+	fs.StringVar(&cfg.PayloadDir, "payload-dir", cfg.PayloadDir, "Local payload override directory")
 	fs.StringVar(&cfg.UserAgent, "ua", "httpsuite/1.0", "User-Agent string")
 	fs.BoolVar(&cfg.RandomAgent, "random-agent", false, "Use random User-Agent")
 
@@ -147,7 +155,7 @@ func parseGlobalFlags(args []string, name string) (*common.Config, error) {
 	var techniques, bypassIP, origin, methodList, filterStatus, gadgetFile string
 	var deepScan, extended bool
 	var smuggleTimeout int
-	fs.StringVar(&techniques, "techniques", "headers,endpaths,midpaths,verbs,double-encoding,path-case", "Bypass techniques")
+	fs.StringVar(&techniques, "techniques", "headers,endpaths,midpaths,verbs,verbs-case,double-encoding,http-versions,path-case", "Bypass techniques")
 	fs.StringVar(&bypassIP, "bypass-ip", "", "Custom IP for header-based bypass")
 	fs.StringVar(&origin, "origin", "https://evil.com", "Custom origin for CORS testing")
 	fs.BoolVar(&deepScan, "deep", false, "Enable deep CORS scan")
@@ -247,7 +255,7 @@ func runBypass(args []string) error {
 	defer printer.Close()
 	printer.Banner()
 
-	techniques := getFlagStr(args, "techniques", "headers,endpaths,midpaths,verbs,double-encoding,path-case")
+	techniques := getFlagStr(args, "techniques", "headers,endpaths,midpaths,verbs,verbs-case,double-encoding,http-versions,path-case")
 	bypassIP := getFlagStr(args, "bypass-ip", "")
 	techs := strings.Split(techniques, ",")
 
@@ -371,7 +379,7 @@ func runAll(args []string) error {
 	// Run bypass
 	printer.SectionHeader("403 BYPASS SCAN")
 	for _, targetURL := range cfg.URLs {
-		techs := []string{"headers", "endpaths", "midpaths", "verbs", "double-encoding", "path-case"}
+		techs := []string{"headers", "endpaths", "midpaths", "verbs", "verbs-case", "double-encoding", "http-versions", "path-case"}
 		scanner := bypass.NewScanner(cfg, printer, targetURL, techs, "")
 		scanner.Run()
 	}
@@ -397,14 +405,44 @@ func runAll(args []string) error {
 	smuggleScanner.Run()
 
 	// Summary
-	results := printer.GetResults()
-	vulnCount := 0
-	for _, r := range results {
-		if r.Vulnerable {
-			vulnCount++
-		}
-	}
-	printer.Info("Scan complete. %d total results, %d potential vulnerabilities found.", len(results), vulnCount)
+	totalResults, vulnCount := printer.Stats()
+	printer.Info("Scan complete. %d total results, %d potential vulnerabilities found.", totalResults, vulnCount)
 
+	return nil
+}
+
+func runSyncPayloads(args []string) error {
+	fs := flag.NewFlagSet("sync-payloads", flag.ContinueOnError)
+
+	payloadDir := "payloads"
+	timeoutSec := 20
+	silent := false
+	noColor := false
+
+	fs.StringVar(&payloadDir, "payload-dir", payloadDir, "Local payload override directory")
+	fs.IntVar(&timeoutSec, "t", timeoutSec, "Timeout in seconds")
+	fs.BoolVar(&silent, "s", false, "Silent mode")
+	fs.BoolVar(&noColor, "no-color", false, "Disable color")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	printer := output.NewPrinter(silent, noColor, false, "")
+	defer printer.Close()
+	printer.Banner()
+	printer.Info("Syncing payload files into %s", payloadDir)
+
+	syncer := payloadsync.New(time.Duration(timeoutSec) * time.Second)
+	files, err := syncer.Sync(payloadDir)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		printer.Success("Updated %s", file)
+	}
+
+	printer.Info("Payload sync complete. %d file(s) updated.", len(files))
 	return nil
 }

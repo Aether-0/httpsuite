@@ -3,6 +3,7 @@ package httpclient
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -112,39 +113,48 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("request failed after %d retries: %w", c.retries, lastErr)
 }
 
-// SimpleRequest makes a simple HTTP request and returns status code and body
-func (c *Client) SimpleRequest(method, targetURL string, extraHeaders map[string]string) (int, []byte, error) {
+// InspectRequest makes a request and returns a bounded response fingerprint.
+func (c *Client) InspectRequest(method, targetURL string, extraHeaders map[string]string) (ResponseSummary, error) {
 	req, err := http.NewRequest(method, targetURL, nil)
 	if err != nil {
-		return 0, nil, fmt.Errorf("error creating request: %w", err)
+		return ResponseSummary{}, fmt.Errorf("error creating request: %w", err)
 	}
 
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
 
-	resp, err := c.Do(req)
+	return c.inspect(req)
+}
+
+// SimpleRequest makes a simple HTTP request and returns the status code and response size.
+func (c *Client) SimpleRequest(method, targetURL string, extraHeaders map[string]string) (int, int, error) {
+	summary, err := c.InspectRequest(method, targetURL, extraHeaders)
 	if err != nil {
-		return 0, nil, err
+		return 0, 0, err
 	}
-	defer resp.Body.Close()
-
-	body := make([]byte, 0)
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			body = append(body, buf[:n]...)
-		}
-		if readErr != nil {
-			break
-		}
-	}
-
-	return resp.StatusCode, body, nil
+	return summary.StatusCode, summary.ContentLength, nil
 }
 
 // GetTransport returns the underlying transport for advanced use
 func (c *Client) GetTransport() *http.Transport {
 	return c.client.Transport.(*http.Transport)
+}
+
+func (c *Client) inspect(req *http.Request) (ResponseSummary, error) {
+	resp, err := c.Do(req)
+	if err != nil {
+		return ResponseSummary{}, err
+	}
+	defer resp.Body.Close()
+
+	capture := &limitedCapture{limit: maxFingerprintBytes}
+	buf := make([]byte, 32*1024)
+	contentLength, err := io.CopyBuffer(io.MultiWriter(io.Discard, capture), resp.Body, buf)
+	summary := buildResponseSummary(resp, capture.Bytes(), int(contentLength))
+	if err != nil {
+		return summary, fmt.Errorf("error reading response body: %w", err)
+	}
+
+	return summary, nil
 }

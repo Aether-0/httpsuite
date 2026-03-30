@@ -20,15 +20,22 @@
 
 ---
 
-**httpsuite** combines the best ideas from multiple open-source HTTP security tools into a single, zero-dependency Go binary. Instead of juggling five different tools with different flags, output formats, and quirks — run one tool that does it all.
+**httpsuite** combines the best ideas from multiple open-source HTTP security tools into a single Go binary. Instead of juggling separate tools with different flags, payload files, and output formats, run one tool with a shared workflow, shared client, synced payload support, and smarter triage.
+
+### Why It Is Useful
+
+- Smart bypass filtering suppresses fake `200` or `3xx` responses that still look like blocked templates
+- `sync-payloads` refreshes current payloads from upstream projects into `payloads/`
+- JSON output now carries richer bypass evidence such as `reason`, `title`, and `fingerprint`
+- A shared HTTP client provides retries, proxy support, custom headers, and TLS handling across modules
 
 | Module | Inspired By | What It Does |
 |--------|-------------|--------------|
-| `bypass` | [nomore403](https://github.com/devploit/nomore403) | 403/401 bypass via verb tampering, header injection, path manipulation, double encoding, case switching |
-| `crlf` | [crlfuzz](https://github.com/dwisiswant0/crlfuzz) | CRLF injection scanning with multiple escape sequence payloads |
-| `cors` | [corser](https://github.com/cyinnove/corser) | CORS misconfiguration detection (origin reflection, wildcard, null origin, prefix/suffix bypass) |
-| `methods` | [httpc](https://github.com/Aether-0/httpc) | HTTP method enumeration across 17+ methods with status code filtering |
-| `smuggle` | [smugglefuzz](https://github.com/Moopinger/smugglefuzz) | HTTP request smuggling via HTTP/2 downgrade with 80+ built-in gadgets |
+| `bypass` | [nomore403](https://github.com/devploit/nomore403) | 403/401 bypass via verb tampering, verb case switching, header injection, path manipulation, double encoding, HTTP version probing, and block-page fingerprinting |
+| `crlf` | [crlfuzz](https://github.com/dwisiswant0/crlfuzz) | CRLF injection scanning with multiple encoded escape payloads and reflected canary-header detection |
+| `cors` | [CORStest](https://github.com/RUB-NDS/CORStest) / [corser](https://github.com/cyinnove/corser) | CORS misconfiguration detection for reflection, null, wildcard, prefix/suffix, subdomain, non-SSL, and alternate-port cases |
+| `methods` | [httpc](https://github.com/Aether-0/httpc) | HTTP method enumeration across 30+ methods with filtering and optional synced method payloads |
+| `smuggle` | [smugglefuzz](https://github.com/Moopinger/smugglefuzz) | HTTP request smuggling via HTTP/2 downgrade with refreshed gadget parsing and synced default/extended gadget lists |
 
 ---
 
@@ -54,64 +61,73 @@ go install github.com/aether-0/httpsuite@latest
 sudo mv httpsuite /usr/local/bin/
 ```
 
+### Refresh Payload Files (optional)
+
+```bash
+httpsuite sync-payloads
+```
+
 ---
 
 ## Modules
 
-### 🔓 Bypass — 403/401 Forbidden Bypass
+### Bypass
 
-Tests a wide range of bypass techniques against restricted endpoints:
+Tests a wide range of 403/401 bypass techniques against restricted endpoints:
 
-- **Header Injection** — Injects headers like `X-Forwarded-For`, `X-Original-URL`, `X-Custom-IP-Authorization`, etc. with various IP values
-- **End-Path Payloads** — Appends path suffixes like `/%2e/`, `/..;/`, `/.;/`, `/./`, etc.
-- **Mid-Path Payloads** — Inserts path traversal sequences in the middle of the URL path
-- **Verb Tampering** — Tests alternate HTTP methods (`POST`, `PUT`, `PATCH`, `TRACE`, `OPTIONS`, etc.)
-- **Double Encoding** — Double URL-encodes path segments to bypass WAFs
-- **Path Case Switching** — Randomizes the case of path characters
+- Header injection with IP, host, URL, origin, and proxy-style headers
+- End-path and mid-path payload insertion
+- Verb tampering and verb case switching
+- Double URL encoding of path segments
+- Path case switching
+- Raw HTTP version probing with `HTTP/1.0` and `HTTP/1.1`
+- Smart suppression of fake success responses that still look like blocked pages
 
-### 💉 CRLF — CRLF Injection Scanner
+### CRLF
 
-Tests for CRLF injection vulnerabilities by injecting various escape sequences:
+Tests for CRLF injection by generating encoded path payloads and looking for a reflected canary header:
 
-- Multiple encoding schemes: `%0d%0a`, `%0D%0A`, `%E5%98%8A%E5%98%8D`, `\r\n`, `%23%0d%0a`, and more
-- Injects a canary header (`Injected: httpsuite`) and checks for reflection in the response
-- Supports both path-based and parameter-based injection points
+- Multiple encoded escape variants such as `%0d%0a`, `%23%0d%0a`, `%u000d`, `%e5%98%8a%e5%98%8d`, and more
+- Reflected header detection using `X-Injected-Header-By: httpsuite`
+- Works against single targets, files, or piped input
 
-### 🌐 CORS — CORS Misconfiguration Detection
+### CORS
 
-Detects various CORS misconfigurations:
+Detects several classes of CORS misconfiguration:
 
-- **Origin Reflection** — Server reflects any arbitrary origin
-- **Null Origin** — Server accepts `Origin: null`
-- **Wildcard with Credentials** — `Access-Control-Allow-Origin: *` combined with `Access-Control-Allow-Credentials: true`
-- **Prefix/Suffix Bypass** — Prepending or appending to the target domain (e.g., `evil-example.com`, `example.com.evil.com`)
-- **Special Character Bypass** — Using special characters to confuse origin parsing
-- **Subdomain Wildcard** — Server trusts any subdomain
-- **Preflight Analysis** — Tests `OPTIONS` request handling
+- Origin reflection
+- Null-origin acceptance
+- Wildcard ACAO, including credential-related misconfigurations
+- Developer-backdoor origins
+- Prefix and suffix domain tricks
+- Subdomain trust issues
+- Non-SSL and alternate-port origin handling
+- Preflight inspection with `OPTIONS`
 
-### 📡 Methods — HTTP Method Enumeration
+### Methods
 
-Enumerates allowed HTTP methods on target endpoints:
+Enumerates allowed or interesting HTTP methods on target endpoints:
 
-- Tests 17+ methods: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`, `TRACE`, `CONNECT`, `PROPFIND`, `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`, `PURGE`
-- Status code filtering to focus on interesting responses
-- Custom method list support
+- Built-in list of 30+ methods
+- Custom method lists with `--methods`
+- Status filtering with `--status`
+- Optional synced method payloads from `payloads/bypass/httpmethods`
 
-### 🚂 Smuggle — HTTP Request Smuggling
+### Smuggle
 
-Tests for HTTP/2 downgrade request smuggling:
+Tests for HTTP request smuggling via HTTP/2 downgrade:
 
-- Establishes raw HTTP/2 connections with `h2c` upgrade
-- Sends crafted requests with manipulated `Transfer-Encoding` and `Content-Length` headers
-- 80+ built-in gadgets covering header mutations, byte injections, and encoding tricks
-- Extended gadget list with additional payload variations
-- Configurable detection timeout (interval)
+- Raw HTTP/2 TLS connection setup with ALPN
+- Default and extended gadget banks
+- Support for custom gadget files with `--wordlist`
+- Synced gadget files from `payloads/smuggle/`
+- Configurable detection timeout with `--interval`
 
 ---
 
 ## Usage
 
-```
+```text
 httpsuite <command> [flags]
 ```
 
@@ -123,8 +139,9 @@ httpsuite <command> [flags]
 | `crlf` | Test for CRLF injection vulnerabilities |
 | `cors` | Test for CORS misconfiguration |
 | `methods` | Test allowed HTTP methods on targets |
-| `smuggle` | Test for HTTP request smuggling via H2 downgrade |
+| `smuggle` | Test for HTTP request smuggling via HTTP/2 downgrade |
 | `all` | Run all modules against target(s) |
+| `sync-payloads` | Download current upstream payload files into a local payload directory |
 | `version` | Show version information |
 | `help` | Show help message |
 
@@ -133,18 +150,20 @@ httpsuite <command> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-u` | string | | Target URL |
-| `-l` | string | | File containing list of URLs (one per line) |
+| `-l` | string | | File containing list of URLs |
 | `-c` | int | `10` | Concurrency level |
 | `-t` | int | `10` | Timeout in seconds |
-| `-x` | string | | Proxy URL (e.g., `http://127.0.0.1:8080`) |
+| `-x` | string | | Proxy URL |
 | `-H` | string | | Custom header (`Key: Value`) — repeatable |
 | `-o` | string | | Output file path |
-| `-j` | | | JSON output mode |
-| `-s` | | | Silent mode (suppress info messages) |
-| `-v` | | | Verbose mode |
-| `--no-color` | | | Disable colored output |
-| `--redirect` | | | Follow redirects |
-| `--random-agent` | | | Use a random User-Agent per request |
+| `-j` | bool | `false` | JSON output mode |
+| `-s` | bool | `false` | Silent mode |
+| `-v` | bool | `false` | Verbose mode |
+| `-ua` | string | `httpsuite/1.0` | Custom User-Agent string |
+| `--payload-dir` | string | `payloads` | Local payload override directory |
+| `--no-color` | bool | `false` | Disable colored output |
+| `--redirect` | bool | `false` | Follow redirects |
+| `--random-agent` | bool | `false` | Use a random User-Agent |
 
 ### Module-Specific Flags
 
@@ -152,65 +171,81 @@ httpsuite <command> [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--techniques` | `headers,endpaths,midpaths,verbs,double-encoding,path-case` | Comma-separated list of bypass techniques |
-| `--bypass-ip` | `127.0.0.1` | Custom IP for header-based bypass |
+| `--techniques` | `headers,endpaths,midpaths,verbs,verbs-case,double-encoding,http-versions,path-case` | Comma-separated bypass techniques |
+| `--bypass-ip` | *(none)* | Custom IP for header-based bypass generation |
+
+Notes:
+- Verbose mode explains why blocked-template responses were suppressed.
+- JSON output includes `reason`, `title`, and `fingerprint` fields for bypass findings.
 
 #### `cors`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--origin` | `https://evil.com` | Custom attacker origin for testing |
-| `--deep` | `false` | Enable deep scan with special characters and extra bypass techniques |
+| `--origin` | `https://evil.com` | Custom attacker origin |
+| `--deep` | `false` | Enable deeper origin mutation coverage |
 
 #### `methods`
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--methods` | *(all built-in)* | Custom comma-separated HTTP methods |
-| `--status` | *(all)* | Filter results by comma-separated status codes |
+| `--status` | *(all)* | Filter results by status codes |
 
 #### `smuggle`
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--extended` | `false` | Use extended gadget list (more payloads) |
-| `--wordlist` | | Custom gadget/payload file |
+| `--extended` | `false` | Use the extended gadget list |
+| `--wordlist` | | Custom gadget file |
 | `--interval` | `5` | Detection timeout in seconds |
+
+Notes:
+- The smuggling module targets `https://` endpoints that negotiate HTTP/2 over TLS.
+
+#### `sync-payloads`
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--payload-dir` | `payloads` | Destination payload directory |
+| `-t` | `20` | Sync timeout in seconds |
+| `-s` | `false` | Silent mode |
+| `--no-color` | `false` | Disable colored output |
 
 ---
 
 ## Examples
 
-### 🔓 Bypass
+### Bypass
 
 ```bash
-# Basic 403 bypass scan
+# Basic 403/401 bypass scan
 httpsuite bypass -u https://example.com/admin
 
-# Use only specific techniques
-httpsuite bypass -u https://example.com/admin --techniques headers,endpaths
+# Focus on specific techniques
+httpsuite bypass -u https://example.com/admin --techniques headers,endpaths,http-versions
 
-# With custom bypass IP and verbose output
-httpsuite bypass -u https://example.com/admin --bypass-ip 10.0.0.1 -v
+# Show suppression reasons and richer bypass triage
+httpsuite bypass -u https://example.com/admin -v -j
 
-# Scan multiple URLs from file
-httpsuite bypass -l urls.txt -c 20
+# Use a custom bypass IP
+httpsuite bypass -u https://example.com/admin --bypass-ip 10.0.0.1
 ```
 
-### 💉 CRLF
+### CRLF
 
 ```bash
 # Basic CRLF scan
 httpsuite crlf -u https://example.com
 
-# Scan URL list with high concurrency
+# Scan a URL list with higher concurrency
 httpsuite crlf -l urls.txt -c 50
 
 # Through a proxy
 httpsuite crlf -u https://example.com -x http://127.0.0.1:8080
 ```
 
-### 🌐 CORS
+### CORS
 
 ```bash
 # Basic CORS scan
@@ -219,139 +254,140 @@ httpsuite cors -u https://example.com
 # Deep scan with custom origin
 httpsuite cors -u https://example.com --deep --origin https://attacker.com
 
-# Scan multiple targets
+# Multiple targets
 httpsuite cors -l urls.txt -c 20
 ```
 
-### 📡 Methods
+### Methods
 
 ```bash
-# Enumerate all methods
+# Enumerate all built-in methods
 httpsuite methods -u https://example.com
 
 # Test specific methods and filter by status
 httpsuite methods -u https://example.com --methods GET,POST,PUT,DELETE --status 200,201,405
 
-# JSON output to file
+# JSON output
 httpsuite methods -u https://example.com -j -o results.json
 ```
 
-### 🚂 Smuggle
+### Smuggle
 
 ```bash
 # Basic smuggling scan
 httpsuite smuggle -u https://example.com
 
-# Extended gadgets with longer timeout
+# Extended gadget list with longer detection timeout
 httpsuite smuggle -u https://example.com --extended --interval 10
 
-# Custom wordlist
+# Custom gadget file
 httpsuite smuggle -u https://example.com --wordlist gadgets.txt
 ```
 
-### 🔁 Run All Modules
+### Payload Sync
 
 ```bash
-# Full scan with all modules
+# Sync payloads into the default directory
+httpsuite sync-payloads
+
+# Sync into a custom payload directory
+httpsuite sync-payloads --payload-dir payloads-custom
+```
+
+### Run All Modules
+
+```bash
+# Full scan
 httpsuite all -u https://example.com
 
-# Full scan with options
+# Full scan with verbose output and higher concurrency
 httpsuite all -u https://example.com -v -c 20
 ```
 
-### 📥 Piping & Stdin
+### Piping and Output
 
 ```bash
-# Pipe URLs from a file
+# Pipe targets from stdin
 cat urls.txt | httpsuite cors
-
-# Pipe a single URL
 echo "https://example.com" | httpsuite methods
 
-# Chain with other tools
-subfinder -d example.com -silent | httpx -silent | httpsuite crlf -c 30
-```
+# Plain text output
+httpsuite all -u https://example.com -o scan.log
 
-### 💾 Output Options
-
-```bash
-# Plain text output to file
-httpsuite methods -u https://example.com -o results.txt
-
-# JSON output to file
-httpsuite cors -u https://example.com -j -o results.json
-
-# Silent mode (only findings, no banners/info)
-httpsuite bypass -u https://example.com/admin -s
-
-# No color (for log files or CI/CD)
-httpsuite all -u https://example.com --no-color -o scan.log
+# JSON output
+httpsuite bypass -u https://example.com/admin -j -o bypass.json
 ```
 
 ---
 
 ## Architecture
 
-```
+```text
 httpsuite/
 ├── main.go                      # Entry point
 ├── cmd/
 │   └── root.go                  # CLI routing & flag parsing
 ├── internal/
-│   ├── bypass/                  # 403/401 bypass module
-│   │   ├── bypass.go            #   Scanner logic & techniques
-│   │   └── payloads.go          #   Headers, paths, methods lists
-│   ├── crlf/                    # CRLF injection module
-│   │   └── crlf.go              #   Escape sequences & detection
-│   ├── cors/                    # CORS misconfiguration module
-│   │   └── cors.go              #   Origin generation & analysis
-│   ├── methods/                 # HTTP methods module
-│   │   └── methods.go           #   Method enumeration logic
-│   └── smuggle/                 # HTTP request smuggling module
-│       ├── smuggle.go           #   H2 downgrade & detection
-│       └── gadgets.go           #   80+ smuggling gadgets
+│   ├── bypass/
+│   │   ├── bypass.go            # Scanner logic, triage, raw HTTP version checks
+│   │   └── payloads.go          # Embedded payloads + synced payload loaders
+│   ├── crlf/
+│   │   └── crlf.go              # Encoded CRLF payload generation and reflection checks
+│   ├── cors/
+│   │   └── cors.go              # Origin generation, preflight, response analysis
+│   ├── methods/
+│   │   └── methods.go           # Method enumeration logic
+│   └── smuggle/
+│       ├── smuggle.go           # HTTP/2 downgrade testing
+│       └── gadgets.go           # Embedded gadget banks
 ├── pkg/
-│   ├── common/                  # Shared types
-│   │   └── types.go             #   Config, ScanResult, Target
-│   ├── httpclient/              # Unified HTTP client
-│   │   └── client.go            #   Retries, proxy, TLS config
-│   ├── output/                  # Output formatting
-│   │   └── output.go            #   Colors, JSON, file output
-│   └── utils/                   # Utility functions
-│       └── utils.go             #   URL normalization, stdin, user-agents
-└── payloads/                    # Optional external payload files
+│   ├── common/
+│   │   └── types.go             # Shared config and result types
+│   ├── httpclient/
+│   │   ├── client.go            # Shared HTTP client
+│   │   └── summary.go           # Response fingerprinting and HTML normalization
+│   ├── output/
+│   │   └── output.go            # Banner, terminal, JSON, and file output
+│   ├── payloadsync/
+│   │   └── payloadsync.go       # Upstream payload downloader/extractor
+│   └── utils/
+│       └── utils.go             # URL helpers, case variants, file helpers
+└── payloads/
+    ├── bypass/                  # Synced bypass payload files
+    └── smuggle/                 # Synced smuggle gadget files
 ```
 
 ---
 
 ## How It Works
 
-1. **Target Input** — Accepts targets via `-u` (single URL), `-l` (file), or `stdin` (piped input)
-2. **Module Dispatch** — Routes to the selected module (or all modules with `all`)
-3. **Concurrent Scanning** — Each module spawns a worker pool based on `-c` concurrency setting
-4. **HTTP Client** — Shared client with configurable timeout, proxy support, TLS settings, and retry logic
-5. **Result Collection** — Results are collected thread-safely and can be output as colored terminal text or JSON
-6. **Output** — Findings are printed in real-time and optionally saved to a file
+1. **Input**: accepts a single URL, a list file, or piped stdin
+2. **Dispatch**: routes to a specific module or runs all modules in sequence
+3. **Shared Client**: applies timeout, retries, proxy, headers, and TLS settings consistently
+4. **Concurrent Workers**: each module runs with a worker pool controlled by `-c`
+5. **Triage**: bypass responses are fingerprinted and compared against blocked baselines
+6. **Output**: results stream to stdout and optionally to text or JSON output files
 
 ---
 
 ## Credits
 
-httpsuite is built by combining techniques and ideas from these excellent tools:
+httpsuite is built by combining techniques and ideas from these projects:
 
 | Tool | Author | Contribution |
 |------|--------|-------------|
-| [nomore403](https://github.com/devploit/nomore403) | devploit | 403 bypass techniques, header/path payloads |
-| [crlfuzz](https://github.com/dwisiswant0/crlfuzz) | dwisiswant0 | CRLF injection escape sequences |
-| [corser](https://github.com/cyinnove/corser) | cyinnove | CORS misconfiguration detection patterns |
-| [httpc](https://github.com/Aether-0/httpc) | Aether-0 | HTTP method enumeration |
-| [smugglefuzz](https://github.com/Moopinger/smugglefuzz) | Moopinger | HTTP/2 smuggling gadgets & detection |
+| [nomore403](https://github.com/devploit/nomore403) | devploit | Header and path-based bypass techniques |
+| [crlfuzz](https://github.com/dwisiswant0/crlfuzz) | dwisiswant0 | CRLF escape sequence inspiration |
+| [CORStest](https://github.com/RUB-NDS/CORStest) | RUB-NDS | CORS payload classes and evaluation patterns |
+| [corser](https://github.com/cyinnove/corser) | cyinnove | Lightweight CORS testing workflow |
+| [httpc](https://github.com/Aether-0/httpc) | Aether-0 | HTTP method testing ideas |
+| [smugglefuzz](https://github.com/Moopinger/smugglefuzz) | Moopinger | HTTP/2 smuggling gadget ideas and payload format |
 
 ---
 
 ## Disclaimer
 
-This tool is intended for **authorized security testing and educational purposes only**. Always obtain proper authorization before testing targets you do not own. The authors are not responsible for any misuse of this tool.
+This tool is intended for **authorized security testing and educational use only**. Always obtain proper authorization before testing systems you do not own or manage.
 
 ---
 

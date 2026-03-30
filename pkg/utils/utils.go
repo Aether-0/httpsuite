@@ -104,38 +104,106 @@ func RandomString(length int) string {
 	return string(b)
 }
 
-// GenerateCaseCombinations generates case combinations for a string
-func GenerateCaseCombinations(s string) []string {
-	if len(s) == 0 {
-		return []string{""}
+// GenerateCaseVariants returns up to limit randomized case variants without materializing 2^n combinations.
+func GenerateCaseVariants(s string, limit int) []string {
+	if limit <= 0 {
+		return nil
 	}
 
-	first := []string{
-		string(unicode.ToLower(rune(s[0]))),
-		string(unicode.ToUpper(rune(s[0]))),
-	}
-	sub := GenerateCaseCombinations(s[1:])
+	base := []rune(s)
+	letterIdx := make([]int, 0, len(base))
 
-	var combos []string
-	for _, c := range first {
-		for _, rest := range sub {
-			combos = append(combos, c+rest)
+	for i, r := range base {
+		if unicode.IsLetter(r) {
+			base[i] = unicode.ToLower(r)
+			letterIdx = append(letterIdx, i)
 		}
 	}
-	return combos
+
+	if len(letterIdx) == 0 {
+		return []string{s}
+	}
+
+	variants := make([]string, 0, limit)
+	seen := make(map[string]struct{}, limit)
+
+	addVariant := func(candidate []rune) {
+		variant := string(candidate)
+		if _, ok := seen[variant]; ok {
+			return
+		}
+		seen[variant] = struct{}{}
+		variants = append(variants, variant)
+	}
+
+	addVariant(append([]rune(nil), base...))
+	if len(variants) == limit {
+		return variants
+	}
+
+	allUpper := append([]rune(nil), base...)
+	for _, idx := range letterIdx {
+		allUpper[idx] = unicode.ToUpper(allUpper[idx])
+	}
+	addVariant(allUpper)
+	if len(variants) == limit {
+		return variants
+	}
+
+	maxAttempts := limit * 32
+	if maxAttempts < len(letterIdx)*4 {
+		maxAttempts = len(letterIdx) * 4
+	}
+
+	for attempts := 0; len(variants) < limit && attempts < maxAttempts; attempts++ {
+		candidate := append([]rune(nil), base...)
+		for _, idx := range letterIdx {
+			if rand.Intn(2) == 1 {
+				candidate[idx] = unicode.ToUpper(candidate[idx])
+			}
+		}
+		addVariant(candidate)
+	}
+
+	for _, idx := range letterIdx {
+		if len(variants) == limit {
+			break
+		}
+		candidate := append([]rune(nil), base...)
+		candidate[idx] = unicode.ToUpper(candidate[idx])
+		addVariant(candidate)
+	}
+
+	return variants
 }
 
-// SelectRandom selects up to n random elements from a slice
-func SelectRandom(items []string, n int) []string {
-	if len(items) <= n {
-		return items
+// UniqueStrings removes duplicates while preserving the original order.
+func UniqueStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
 	}
-	shuffled := make([]string, len(items))
-	copy(shuffled, items)
-	rand.Shuffle(len(shuffled), func(i, j int) {
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	})
-	return shuffled[:n]
+
+	seen := make(map[string]struct{}, len(items))
+	unique := make([]string, 0, len(items))
+
+	for _, item := range items {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		unique = append(unique, item)
+	}
+
+	return unique
+}
+
+// PathExists reports whether a filesystem path exists.
+func PathExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // URLEncode double-encodes a string

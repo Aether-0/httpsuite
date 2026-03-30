@@ -1,6 +1,7 @@
 package methods
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -8,14 +9,18 @@ import (
 	"github.com/aether-0/httpsuite/pkg/common"
 	"github.com/aether-0/httpsuite/pkg/httpclient"
 	"github.com/aether-0/httpsuite/pkg/output"
+	"github.com/aether-0/httpsuite/pkg/utils"
 )
 
 // Default HTTP methods to test
 var defaultMethods = []string{
 	"GET", "POST", "PUT", "DELETE", "PATCH",
 	"HEAD", "OPTIONS", "TRACE", "CONNECT",
-	"PROPFIND", "PROPPATCH", "MKCOL", "COPY",
-	"MOVE", "LOCK", "UNLOCK", "PURGE",
+	"COPY", "LOCK", "MOVE", "SEARCH", "TRACK",
+	"UNLOCK", "BIND", "REBIND", "UNBIND",
+	"PROPFIND", "PROPPATCH", "MKCOL", "MKACTIVITY", "MKCALENDAR",
+	"CHECKOUT", "CHECKIN", "UNCHECKOUT", "VERSION-CONTROL",
+	"REPORT", "LABEL", "MERGE", "ACL", "UPDATE", "PURGE",
 }
 
 // Scanner performs HTTP method testing
@@ -44,6 +49,14 @@ func NewScanner(cfg *common.Config, printer *output.Printer, methodList string, 
 		methods = strings.Split(methodList, ",")
 		for i := range methods {
 			methods[i] = strings.TrimSpace(methods[i])
+		}
+	} else if cfg.PayloadDir != "" {
+		filePath := filepath.Join(cfg.PayloadDir, "bypass", "httpmethods")
+		if utils.PathExists(filePath) {
+			lines, err := utils.ReadLines(filePath)
+			if err == nil && len(lines) > 0 {
+				methods = utils.UniqueStrings(append(lines, defaultMethods...))
+			}
 		}
 	}
 
@@ -84,7 +97,7 @@ func (s *Scanner) Run() {
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				statusCode, body, err := s.client.SimpleRequest(method, targetURL, nil)
+				statusCode, contentLength, err := s.client.SimpleRequest(method, targetURL, nil)
 				if err != nil {
 					if s.config.Verbose {
 						s.printer.Error("Error with %s [%s]: %v", targetURL, method, err)
@@ -119,7 +132,7 @@ func (s *Scanner) Run() {
 					URL:           targetURL,
 					Method:        method,
 					StatusCode:    statusCode,
-					ContentLength: len(body),
+					ContentLength: contentLength,
 					Module:        "methods",
 					Detail:        detail,
 					Vulnerable:    vulnerable,

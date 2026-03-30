@@ -22,6 +22,11 @@ type Scanner struct {
 	deepScan bool
 }
 
+type originPayload struct {
+	value    string
+	category string
+}
+
 // NewScanner creates a new CORS scanner
 func NewScanner(cfg *common.Config, printer *output.Printer, origin string, deepScan bool) *Scanner {
 	client := httpclient.New(httpclient.Options{
@@ -51,33 +56,17 @@ func (s *Scanner) Run() {
 	sem := make(chan struct{}, s.config.Concurrency)
 
 	for _, targetURL := range s.config.URLs {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(targetURL string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			s.scanTarget(targetURL)
-		}(targetURL)
-	}
-	wg.Wait()
-}
+		s.preflightCheck(targetURL)
 
-func (s *Scanner) scanTarget(targetURL string) {
-	// First, run preflight check
-	s.preflightCheck(targetURL)
-
-	// Generate origin payloads
-	payloads := s.generatePayloads(targetURL)
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, payload := range payloads {
-		wg.Add(1)
-		go func(origin string) {
-			defer wg.Done()
-			s.testOrigin(targetURL, origin, &mu)
-		}(payload)
+		for _, payload := range s.generatePayloads(targetURL) {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(targetURL string, payload originPayload) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				s.testOrigin(targetURL, payload)
+			}(targetURL, payload)
+		}
 	}
 	wg.Wait()
 }
@@ -117,13 +106,13 @@ func (s *Scanner) preflightCheck(targetURL string) {
 	}
 }
 
-func (s *Scanner) testOrigin(targetURL, origin string, mu *sync.Mutex) {
+func (s *Scanner) testOrigin(targetURL string, payload originPayload) {
 	req, err := http.NewRequest(s.config.Method, targetURL, nil)
 	if err != nil {
 		return
 	}
 
-	req.Header.Set("Origin", origin)
+	req.Header.Set("Origin", payload.value)
 	req.Header.Set("User-Agent", s.config.UserAgent)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Language", "en")
@@ -142,118 +131,162 @@ func (s *Scanner) testOrigin(targetURL, origin string, mu *sync.Mutex) {
 
 	acao := resp.Header.Get("Access-Control-Allow-Origin")
 	acac := resp.Header.Get("Access-Control-Allow-Credentials")
+	vary := resp.Header.Get("Vary")
 
-	vulnerable, details := evaluateResponse(origin, acao, acac)
+	vulnerable, details := evaluateResponse(payload, acao, acac, vary)
 	if vulnerable {
-		mu.Lock()
 		for _, detail := range details {
 			s.printer.Result(common.ScanResult{
 				URL:        targetURL,
 				Method:     s.config.Method,
 				StatusCode: resp.StatusCode,
 				Module:     "cors",
-				Detail:     fmt.Sprintf("Origin: %s → %s", origin, detail),
+				Detail:     fmt.Sprintf("Origin: %s → %s", payload.value, detail),
 				Vulnerable: true,
 			})
 		}
-		mu.Unlock()
 	} else if s.config.Verbose {
 		s.printer.Result(common.ScanResult{
 			URL:        targetURL,
 			Method:     s.config.Method,
 			StatusCode: resp.StatusCode,
 			Module:     "cors",
-			Detail:     fmt.Sprintf("Origin: %s → not vulnerable", origin),
+			Detail:     fmt.Sprintf("Origin: %s → not vulnerable", payload.value),
 			Vulnerable: false,
 		})
 	}
 }
 
 // generatePayloads creates origin payloads for CORS testing
-func (s *Scanner) generatePayloads(targetURL string) []string {
+func (s *Scanner) generatePayloads(targetURL string) []originPayload {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return []string{s.origin}
+		return []originPayload{{value: s.origin, category: "custom"}}
 	}
 
-	host := parsedURL.Hostname()
-	parts := strings.Split(host, ".")
-	var domain, tld string
-	if len(parts) >= 2 {
-		domain = parts[len(parts)-2]
-		tld = parts[len(parts)-1]
-	} else {
-		domain = host
-		tld = ""
+	host := parsedURL.Host
+	hostname := parsedURL.Hostname()
+	scheme := parsedURL.Scheme
+	if scheme == "" {
+		scheme = "https"
 	}
 
-	payloads := []string{
-		// Null origin
-		"null",
-		// Evil origin
-		"https://evil.com",
-		"http://evil.com",
-		// Reflected origin (the target itself)
-		targetURL,
-		// Prefix match bypass
-		fmt.Sprintf("https://%s.%s.evil.com", domain, tld),
-		// Suffix match bypass
-		fmt.Sprintf("https://evil%s.%s", domain, tld),
-		// Subdomain
-		fmt.Sprintf("https://sub.%s.%s", domain, tld),
-		// With port
-		fmt.Sprintf("https://%s.%s:8080", domain, tld),
-		// Double domain
-		fmt.Sprintf("https://%s.%s.%s.%s", domain, tld, domain, tld),
+	payloads := []originPayload{
+		{value: "null", category: "null"},
+		{value: "https://evil.com", category: "reflection"},
+		{value: "http://evil.com", category: "reflection"},
+		{value: "https://fiddle.jshell.net", category: "developer-backdoor"},
+		{value: "https://s.codepen.io", category: "developer-backdoor"},
+		{value: scheme + "://" + host, category: "same-origin"},
+		{value: scheme + "://sub." + hostname, category: "subdomain"},
+		{value: scheme + "://not" + hostname, category: "predomain"},
+		{value: scheme + "://" + hostname + ".evil.com", category: "postdomain"},
+		{value: scheme + "://" + hostname + ".tk", category: "postdomain"},
+		{value: scheme + "://" + hostname + ":8080", category: "alternate-port"},
+		{value: s.origin, category: "custom"},
+	}
+
+	if scheme == "https" {
+		payloads = append(payloads,
+			originPayload{value: "http://" + host, category: "non-ssl"},
+			originPayload{value: "http://sub." + hostname, category: "non-ssl"},
+		)
 	}
 
 	if s.deepScan {
-		// Additional deep scan payloads
 		specialChars := []string{
 			"!", "'", "(", ")", "*", ",", ";", "_", "{", "}",
 			"|", "~", "\"", "`", "+", "-",
 		}
 		for _, c := range specialChars {
-			payloads = append(payloads, fmt.Sprintf("https://%s.%s%s.evil.com", domain, tld, c))
+			payloads = append(payloads, originPayload{
+				value:    fmt.Sprintf("%s://%s%s.evil.com", scheme, hostname, c),
+				category: "postdomain",
+			})
 		}
-		// User-at-domain bypass
-		payloads = append(payloads, fmt.Sprintf("https://evil.com%%40%s.%s", domain, tld))
-		payloads = append(payloads, fmt.Sprintf("https://evil.com%%23@%s.%s", domain, tld))
+		payloads = append(payloads,
+			originPayload{value: fmt.Sprintf("%s://evil.com%%40%s", scheme, hostname), category: "reflection"},
+			originPayload{value: fmt.Sprintf("%s://evil.com%%23@%s", scheme, hostname), category: "reflection"},
+		)
 	}
 
-	return payloads
+	return dedupeOriginPayloads(payloads)
 }
 
 // evaluateResponse checks for CORS misconfigurations
-func evaluateResponse(payload, acao, acac string) (bool, []string) {
+func evaluateResponse(payload originPayload, acao, acac, vary string) (bool, []string) {
 	var details []string
-
-	// Check origin reflected
-	if acao == payload {
-		detail := fmt.Sprintf("ACAO reflects origin: %s", acao)
-		if acac == "true" {
-			detail += " (with credentials)"
-		}
-		details = append(details, detail)
+	creds := strings.EqualFold(acac, "true")
+	credSuffix := ""
+	if creds {
+		credSuffix = " (with credentials)"
 	}
 
-	// Check wildcard
+	if strings.ContainsAny(acao, ",|") || (strings.Contains(acao, " ") && acao != "null") {
+		details = append(details, "Invalid ACAO header formatting")
+	}
+
+	if strings.Contains(acao, "*.") {
+		details = append(details, "Invalid wildcard use in ACAO")
+	}
+
 	if acao == "*" {
-		details = append(details, "Wildcard ACAO: *")
+		details = append(details, "Wildcard ACAO: *"+credSuffix)
 	}
 
-	// Check null origin
-	if acao == "null" && payload == "null" {
-		details = append(details, "Null origin allowed in ACAO")
+	if payload.value == "null" && acao == "null" {
+		details = append(details, "Null misconfiguration"+credSuffix)
 	}
 
-	// Check credentials with reflected origin
-	if acac == "true" && acao != "" && acao != "*" && acao == payload {
-		details = append(details, fmt.Sprintf("Credentials allowed with reflected origin: ACAO=%s, ACAC=true", acao))
+	if acao == payload.value {
+		switch payload.category {
+		case "developer-backdoor":
+			details = append(details, "Developer backdoor"+credSuffix)
+		case "reflection":
+			details = append(details, "Origin reflection"+credSuffix)
+		case "predomain":
+			details = append(details, "Pre-domain wildcard"+credSuffix)
+		case "postdomain":
+			details = append(details, "Post-domain wildcard"+credSuffix)
+		case "subdomain":
+			details = append(details, "Arbitrary subdomains allowed"+credSuffix)
+		case "non-ssl":
+			details = append(details, "Non-ssl origin allowed"+credSuffix)
+		case "alternate-port":
+			details = append(details, "Arbitrary origin/port reflection"+credSuffix)
+		case "custom":
+			details = append(details, "Custom origin reflected"+credSuffix)
+		}
+
+		if creds && payload.category != "same-origin" && payload.category != "null" {
+			details = append(details, fmt.Sprintf("Credentials allowed with reflected origin: ACAO=%s, ACAC=true", acao))
+		}
+	}
+
+	if strings.Contains(vary, "Origin") && acao != "" && creds {
+		details = append(details, "ACAO dynamically varies on Origin with credentials")
 	}
 
 	if len(details) > 0 {
 		return true, details
 	}
 	return false, nil
+}
+
+func dedupeOriginPayloads(payloads []originPayload) []originPayload {
+	seen := make(map[string]struct{}, len(payloads))
+	deduped := make([]originPayload, 0, len(payloads))
+
+	for _, payload := range payloads {
+		if payload.value == "" {
+			continue
+		}
+		if _, ok := seen[payload.value]; ok {
+			continue
+		}
+		seen[payload.value] = struct{}{}
+		deduped = append(deduped, payload)
+	}
+
+	return deduped
 }
